@@ -53,6 +53,9 @@ def _sha256_hex(data: bytes) -> str:
 class Embedder(Protocol):
     """Consumer-supplied embedding function pinned by model identity."""
 
+    model_id: str
+    model_digest: str
+
     def embed(self, text: str) -> list[float]:
         """Return the embedding vector for ``text``."""
         ...
@@ -198,6 +201,27 @@ class CorpusPublisher:
         errors = validate_manifests(list(manifests))
         if errors:
             return self._fail(publication_run_id, target, f"manifest_validation:{len(errors)}_error(s)")
+
+        # 2a. Require a pinned embedder whose identity matches the batch.
+        # All manifests share the same embedding_model_id/digest (validated above).
+        batch_model_id = manifests[0].embedding_model_id
+        batch_model_digest = manifests[0].embedding_model_digest
+        if self._embedder is None:
+            return self._fail(publication_run_id, target, "embedding_configuration:missing_embedder")
+        if getattr(self._embedder, "model_id", None) != batch_model_id:
+            return self._fail(publication_run_id, target, "embedding_configuration:model_id_mismatch")
+        if getattr(self._embedder, "model_digest", None) != batch_model_digest:
+            return self._fail(publication_run_id, target, "embedding_configuration:model_digest_mismatch")
+
+        # 2b. Reject a chunker whose version doesn't match the batch manifest.
+        batch_chunker_version = manifests[0].chunker_version
+        if self._chunker.version != batch_chunker_version:
+            return self._fail(
+                publication_run_id,
+                target,
+                f"chunker_version_mismatch:chunker={self._chunker.version},batch={batch_chunker_version}",
+            )
+
         for m in manifests:
             text = source_texts.get(m.source_version_id)
             if text is None:
@@ -228,6 +252,11 @@ class CorpusPublisher:
         except Exception as exc:
             return self._fail(publication_run_id, target, f"chunking_or_embedding:{type(exc).__name__}")
 
+        # 4a. Validate embedding vectors before write.
+        dim_error = self._validate_embeddings(embeddings)
+        if dim_error:
+            return self._fail(publication_run_id, target, dim_error)
+
         # 5. Validate: chunk integrity + deterministic release construction.
         result = self._validate_release(
             publication_run_id=publication_run_id,
@@ -248,7 +277,7 @@ class CorpusPublisher:
             )
         )
 
-        # 6. Persist and atomically activate.
+        # 8. Persist and atomically activate.
         try:
             store.write_release(release, chunks, embeddings)
             activated = ReleaseBuilder().with_activation(release, activated_at=self._clock())
@@ -416,6 +445,31 @@ class CorpusPublisher:
         if self._embedder is None:
             return {}
         return {c.chunk_id: self._embedder.embed(c.content) for c in chunks}
+
+    @staticmethod
+    def _validate_embeddings(embeddings: Mapping[str, object]) -> str | None:
+        """Check that all embedding vectors are finite numeric lists of one dimension.
+
+        Returns an ``embedding_validation:*`` error code string if validation
+        fails, or ``None`` when the embeddings are consistent. Never includes
+        source text or provider payloads in the returned code.
+        """
+        if not embeddings:
+            return None
+        dims: set[int] = set()
+        for vec in embeddings.values():
+            if not isinstance(vec, list):
+                return "embedding_validation:invalid_vector"
+            if len(vec) == 0:
+                return "embedding_validation:empty_vector"
+            if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in vec):
+                return "embedding_validation:invalid_vector"
+            if not all(value == value and value not in (float("inf"), float("-inf")) for value in vec):
+                return "embedding_validation:non_finite_values"
+            dims.add(len(vec))
+        if len(dims) > 1:
+            return "embedding_validation:inconsistent_dimension"
+        return None
 
     def _fail(
         self,

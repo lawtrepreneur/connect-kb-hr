@@ -122,9 +122,11 @@ class DeterministicChunker:
         """Re-hash chunk contents and check ordinal/chunk_id consistency.
 
         Returns a list of error strings (empty when all chunks verify).
+        Ordinal uniqueness is scoped per source_version_id; two chunks from
+        different sources may share ordinal 0 without error.
         """
         errors: list[str] = []
-        seen_ordinal: set[int] = set()
+        seen_ordinals: set[tuple[str, int]] = set()
         for c in chunks:
             expected = _sha256_hex(c.content.encode("utf-8"))
             if expected != c.content_hash:
@@ -132,7 +134,8 @@ class DeterministicChunker:
             expected_id = _chunk_id(c.source_version_id, c.ordinal, c.content_hash, c.chunker_version)
             if expected_id != c.chunk_id:
                 errors.append(f"chunk {c.chunk_id}: chunk_id mismatch")
-            if c.ordinal in seen_ordinal:
-                errors.append(f"chunk {c.chunk_id}: duplicate ordinal {c.ordinal}")
-            seen_ordinal.add(c.ordinal)
+            key = (c.source_version_id, c.ordinal)
+            if key in seen_ordinals:
+                errors.append(f"chunk {c.chunk_id}: duplicate ordinal {c.ordinal} for source {c.source_version_id}")
+            seen_ordinals.add(key)
         return errors

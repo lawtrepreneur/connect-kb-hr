@@ -95,6 +95,9 @@ class CorpusManifest:
             raise ValueError("rights_basis and rights_holder are required publication gates")
         if not self.canonical_origin or not self.canonical_locator:
             raise ValueError("canonical_origin and canonical_locator are required")
+        for field_name in ("chunker_version", "embedding_model_id", "embedding_model_digest"):
+            if not getattr(self, field_name):
+                raise ValueError(f"{field_name} is required")
         if self.manifest_schema_version != MANIFEST_SCHEMA_VERSION:
             raise ValueError(f"unsupported manifest_schema_version: {self.manifest_schema_version!r}")
 
@@ -150,6 +153,10 @@ def validate_manifests(manifests: Sequence[CorpusManifest]) -> list[str]:
 
     Returns a list of human-readable error strings (empty when the batch is
     clean). Errors never include source body text.
+
+    All manifests in a batch must share the same ``chunker_version``,
+    ``embedding_model_id``, and ``embedding_model_digest``; mixing them
+    across sources would produce an incoherent release.
     """
     errors: list[str] = []
     seen: dict[str, str] = {}
@@ -160,4 +167,11 @@ def validate_manifests(manifests: Sequence[CorpusManifest]) -> list[str]:
         if m.source_version_id in seen:
             errors.append(f"duplicate source_version_id {m.source_version_id!r}")
         seen[m.source_version_id] = m.source_id
+
+    # Batch-level compatibility: all manifests must agree on chunker/embedding identity.
+    for field_name in ("chunker_version", "embedding_model_id", "embedding_model_digest"):
+        values = {getattr(m, field_name) for m in manifests}
+        if len(values) > 1:
+            errors.append(f"mixed {field_name} in batch: {sorted(values)}")
+
     return errors

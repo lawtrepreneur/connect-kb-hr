@@ -15,7 +15,7 @@ from dataclasses import dataclass
 _IDENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class TargetConfig:
     """One product-owned publication target.
 
@@ -66,6 +66,14 @@ class TargetConfig:
             dsn=dsn,
             publisher_role=role,
             schema_name=f"{product}_{audience}",
+        )
+
+    def __repr__(self) -> str:
+        """DSN is omitted; use describe() for log-safe human output."""
+        return (
+            f"TargetConfig(product={self.product!r}, audience={self.audience!r},"
+            f" dsn=<redacted>, publisher_role={self.publisher_role!r},"
+            f" schema_name={self.schema_name!r})"
         )
 
     def describe(self) -> str:
