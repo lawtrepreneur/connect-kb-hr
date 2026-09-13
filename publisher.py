@@ -10,15 +10,17 @@ CorpusStore protocol, mirroring the EntitlementStore pattern in
 ``gating/adapters.py``. A PostgreSQL adapter implementing the protocol is
 supplied by the deployment; tests use an in-memory store.
 
+The publisher handles one target per call. Its store implementation owns the
+atomic active-release-pointer update used by activation and rollback.
+
 Invariants enforced here:
 
 - publication is idempotent for an unchanged manifest;
-- a failed target never partially activates a release and never blocks
-  independent targets;
-- activation is transactional; rollback selects the prior validated release;
+- the supplied source body must match its manifest content hash before release
+  construction;
 - the emergency path can suspend/withdraw but never introduce new content;
-- nothing logged or persisted contains source bodies, DSNs, credentials, or
-  request/response payloads (events carry identifiers and hashes only).
+- events contain identifiers and controlled reason codes, never source bodies,
+  DSNs, credentials, or request/response payloads.
 """
 
 from __future__ import annotations
@@ -26,10 +28,10 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from .audit import PublicationEvent, PublicationEventLog
-from .chunker import CHUNKER_VERSION, Chunk, DeterministicChunker
+from .chunker import Chunk, DeterministicChunker
 from .manifest import CorpusManifest, validate_manifests
 from .release import Release, ReleaseBuilder
 from .target import TargetConfig
@@ -108,7 +110,7 @@ class PublicationResult:
     """Outcome of one publish attempt against one target."""
 
     target: TargetConfig
-    status: str  # "activated" | "noop" | "rejected" | "failed"
+    status: str  # "activated" | "noop" | "failed"
     release_id: str | None = None
     detail: str | None = None
 
@@ -137,11 +139,7 @@ class EmergencyResult:
 
 
 class CorpusPublisher:
-    """Validates, builds, and atomically activates corpus releases.
-
-    One publisher instance can serve any number of targets; each target
-    carries its own credentials and failures are isolated per target.
-    """
+    """Builds and activates one target's immutable corpus release."""
 
     SUPPORTED_SCHEMA_VERSIONS: frozenset[str] = frozenset({"1.0"})
 
@@ -194,17 +192,25 @@ class CorpusPublisher:
         if schema_version not in self.SUPPORTED_SCHEMA_VERSIONS:
             return self._fail(publication_run_id, target, f"unsupported_schema_version:{schema_version}")
 
-        # 2. Validate the manifest batch.
+        # 2. Validate the manifest batch and source bodies before any write.
+        if not manifests:
+            return self._fail(publication_run_id, target, "empty_manifest_batch")
         errors = validate_manifests(list(manifests))
         if errors:
             return self._fail(publication_run_id, target, f"manifest_validation:{len(errors)}_error(s)")
         for m in manifests:
-            if m.source_version_id not in source_texts:
+            text = source_texts.get(m.source_version_id)
+            if text is None:
                 return self._fail(publication_run_id, target, "missing_source_text")
+            if _sha256_hex(text.encode("utf-8")) != m.content_hash:
+                return self._fail(publication_run_id, target, "source_content_hash_mismatch")
 
         # 3. Idempotency: unchanged manifest batch is a no-op.
         batch_hash = self._batch_hash(manifests)
-        active = store.active_release()
+        try:
+            active = store.active_release()
+        except Exception as exc:
+            return self._fail(publication_run_id, target, f"active_release_check_unavailable:{type(exc).__name__}")
         if active is not None and active.manifest_hash == batch_hash:
             self._events.append(
                 PublicationEvent(
@@ -218,24 +224,22 @@ class CorpusPublisher:
         # 4. Chunk and embed.
         try:
             chunks = self._chunk_all(manifests, source_texts)
-        except ValueError as exc:
-            return self._fail(publication_run_id, target, f"chunking:{type(exc).__name__}")
-        chunk_errors = DeterministicChunker.verify_chunks(chunks)
-        if chunk_errors:
-            return self._fail(publication_run_id, target, f"chunk_verification:{len(chunk_errors)}_error(s)")
-        embeddings = self._embed_all(chunks)
+            embeddings = self._embed_all(chunks)
+        except Exception as exc:
+            return self._fail(publication_run_id, target, f"chunking_or_embedding:{type(exc).__name__}")
 
-        # 5. Build and validate the release.
-        builder = ReleaseBuilder()
-        release = builder.build(
+        # 5. Validate: chunk integrity + deterministic release construction.
+        result = self._validate_release(
             publication_run_id=publication_run_id,
-            product=target.product,
-            audience=target.audience,
-            manifests=list(manifests),
+            target=target,
+            manifests=manifests,
             chunks=chunks,
             source_commit=source_commit,
         )
-        release = builder.with_validation(release, passed=True)
+        if isinstance(result, PublicationResult):
+            # Validation failed — _validate_release already emitted build_failed.
+            return result
+        release = result
         self._events.append(
             PublicationEvent(
                 event_id="", publication_run_id=publication_run_id, product=target.product,
@@ -247,7 +251,7 @@ class CorpusPublisher:
         # 6. Persist and atomically activate.
         try:
             store.write_release(release, chunks, embeddings)
-            activated = builder.with_activation(release, activated_at=self._clock())
+            activated = ReleaseBuilder().with_activation(release, activated_at=self._clock())
             store.activate_release(activated.release_id, activated.activated_at or "")
         except Exception as exc:
             return self._fail(publication_run_id, target, f"activation:{type(exc).__name__}", release_id=release.release_id)
@@ -301,7 +305,105 @@ class CorpusPublisher:
         )
         return EmergencyResult(target=target, status=state, source_version_id=source_version_id)
 
+    # -- rollback path -------------------------------------------------------
+
+    def rollback(
+        self,
+        *,
+        publication_run_id: str,
+        target: TargetConfig,
+        store: CorpusStore,
+    ) -> PublicationResult:
+        """Roll back this target to the immediately previous validated release.
+
+        Reads the store's validated release list and re-points the active
+        pointer at the first validated release that is not currently active.
+        Never rebuilds, re-chunks, embeds, or mutates content.
+        """
+        self._events.append(
+            PublicationEvent(
+                event_id="", publication_run_id=publication_run_id, product=target.product,
+                audience=target.audience, kind="build_started", timestamp=self._clock(),
+            )
+        )
+
+        try:
+            active = store.active_release()
+        except Exception as exc:
+            return self._fail(publication_run_id, target, f"rollback_active_read:{type(exc).__name__}")
+
+        try:
+            validated = store.validated_releases()
+        except Exception as exc:
+            return self._fail(publication_run_id, target, f"rollback_validated_read:{type(exc).__name__}")
+
+        active_id = active.release_id if active is not None else None
+        predecessor = next(
+            (r for r in validated if r.release_id != active_id),
+            None,
+        )
+        if predecessor is None:
+            return self._fail(publication_run_id, target, "no_prior_validated_release")
+
+        try:
+            store.rollback_release(predecessor.release_id, self._clock())
+        except Exception as exc:
+            return self._fail(publication_run_id, target, f"rollback_write:{type(exc).__name__}", release_id=predecessor.release_id)
+
+        self._events.append(
+            PublicationEvent(
+                event_id="", publication_run_id=publication_run_id, product=target.product,
+                audience=target.audience, kind="release_rolled_back",
+                release_id=predecessor.release_id, manifest_hash=predecessor.manifest_hash,
+                timestamp=self._clock(),
+            )
+        )
+        return PublicationResult(target=target, status="activated", release_id=predecessor.release_id)
+
     # -- helpers -------------------------------------------------------------
+
+    def _validate_release(
+        self,
+        *,
+        publication_run_id: str,
+        target: TargetConfig,
+        manifests: Sequence[CorpusManifest],
+        chunks: list[Chunk],
+        source_commit: str,
+    ) -> Release | PublicationResult:
+        """Run all explicit validation gates and return a validated Release or a failure result.
+
+        Gates (in order):
+        1. Chunk integrity via DeterministicChunker.verify_chunks.
+        2. Deterministic release construction via ReleaseBuilder.build.
+        3. Promote validation_status to 'passed' via ReleaseBuilder.with_validation.
+
+        Returns a Release on success. Returns a PublicationResult(status='failed') — with
+        build_failed already emitted — on any gate failure.
+        """
+        chunk_errors = DeterministicChunker.verify_chunks(chunks)
+        if chunk_errors:
+            return self._fail(publication_run_id, target, f"chunk_verification:{len(chunk_errors)}_error(s)")
+
+        builder = ReleaseBuilder()
+        try:
+            release = builder.build(
+                publication_run_id=publication_run_id,
+                product=target.product,
+                audience=target.audience,
+                manifests=list(manifests),
+                chunks=chunks,
+                source_commit=source_commit,
+            )
+        except Exception as exc:
+            return self._fail(publication_run_id, target, f"release_construction:{type(exc).__name__}")
+
+        try:
+            release = builder.with_validation(release, passed=True)
+        except Exception as exc:
+            return self._fail(publication_run_id, target, f"release_validation:{type(exc).__name__}")
+
+        return release
 
     def _chunk_all(self, manifests: Sequence[CorpusManifest], source_texts: Mapping[str, str]) -> list[Chunk]:
         chunks: list[Chunk] = []
