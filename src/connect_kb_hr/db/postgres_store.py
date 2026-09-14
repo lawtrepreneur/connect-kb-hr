@@ -13,18 +13,25 @@ long-lived connection pool (the publisher is a batch process, not a server).
 from __future__ import annotations
 
 import os
+import uuid
+from datetime import datetime, timezone
 from typing import Mapping, Sequence
 
 import psycopg2
 import psycopg2.extras
 
 from connect_kb_hr.corpus.chunker import Chunk
+from connect_kb_hr.corpus.manifest import CorpusManifest
 from connect_kb_hr.corpus.publisher import CorpusStore
-from connect_kb_hr.corpus.release import Release, ReleaseBuilder
+from connect_kb_hr.corpus.release import Release
 
 # Schema version this adapter was written against.
 # The publisher gates on this before any mutation.
 SUPPORTED_SCHEMA_VERSION = "1.0"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class PostgresCorpusStore:
@@ -69,7 +76,8 @@ class PostgresCorpusStore:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT version FROM {self._schema}.schema_version ORDER BY applied_at DESC LIMIT 1"
+                    f"SELECT version FROM {self._schema}.schema_version "
+                    "ORDER BY applied_at DESC LIMIT 1"
                 )
                 row = cur.fetchone()
                 if row is None:
@@ -80,7 +88,8 @@ class PostgresCorpusStore:
         with self._connect() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(f"""
-                    SELECT r.*
+                    SELECT r.*,
+                           split_part('{self._schema}', '_', 2) AS audience
                     FROM {self._schema}.releases r
                     JOIN {self._schema}.active_release ar ON ar.release_id = r.release_id
                 """)
@@ -90,13 +99,15 @@ class PostgresCorpusStore:
                 return self._row_to_release(row)
 
     def validated_releases(self) -> list[Release]:
+        audience = self._schema.split("_", 1)[1]  # hr_employer -> employer
         with self._connect() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(f"""
-                    SELECT * FROM {self._schema}.releases
+                    SELECT *, %s AS audience
+                    FROM {self._schema}.releases
                     WHERE validation_status = 'passed'
                     ORDER BY created_at DESC
-                """)
+                """, (audience,))
                 return [self._row_to_release(row) for row in cur.fetchall()]
 
     def write_release(
@@ -104,11 +115,58 @@ class PostgresCorpusStore:
         release: Release,
         chunks: Sequence[Chunk],
         embeddings: Mapping[str, list[float]],
+        manifests: Sequence[CorpusManifest] | None = None,
     ) -> None:
-        """Write release + chunks + embeddings atomically (not yet activated)."""
+        """Write release + source projections + chunks + embeddings atomically.
+
+        ``manifests`` is optional but required for sources/source_versions to
+        be written. Without it, FK constraints on chunks will fail if the
+        source_version rows do not already exist.
+
+        Idempotent: ON CONFLICT DO NOTHING throughout.
+        """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                # Insert release
+                # 1. Upsert source + source_version rows (FK parents of chunks)
+                if manifests:
+                    for m in manifests:
+                        cur.execute(f"""
+                            INSERT INTO {self._schema}.sources (
+                                source_id, source_kind, canonical_origin,
+                                rights_basis, rights_holder, permitted_use,
+                                attribution_required, created_at
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                            ON CONFLICT (source_id) DO NOTHING
+                        """, (
+                            m.source_id, m.source_kind, m.canonical_origin,
+                            m.rights_basis, m.rights_holder, m.permitted_use,
+                            m.attribution_required,
+                        ))
+                        cur.execute(f"""
+                            INSERT INTO {self._schema}.source_versions (
+                                source_version_id, source_id, content_hash, metadata_hash,
+                                jurisdiction, effective_start, effective_end,
+                                canonical_locator, origin_commit, global_state,
+                                chunker_version, embedding_model_id, embedding_model_digest,
+                                manifest_schema_version, created_at
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                            ON CONFLICT (source_version_id) DO NOTHING
+                        """, (
+                            m.source_version_id, m.source_id,
+                            m.content_hash, m.metadata_hash,
+                            m.jurisdiction,
+                            m.effective_interval.start,
+                            m.effective_interval.end,
+                            m.canonical_locator,
+                            m.provenance.origin_commit,
+                            m.global_state,
+                            m.chunker_version,
+                            m.embedding_model_id,
+                            m.embedding_model_digest,
+                            m.manifest_schema_version,
+                        ))
+
+                # 2. Insert release record
                 cur.execute(f"""
                     INSERT INTO {self._schema}.releases (
                         release_id, publication_run_id, manifest_hash, source_commit,
@@ -129,17 +187,19 @@ class PostgresCorpusStore:
                     release.activated_at,
                 ))
 
-                # Insert chunks + embeddings
+                # 3. Insert chunks + embeddings
                 for chunk in chunks:
                     vec = embeddings.get(chunk.chunk_id)
-                    # psycopg2 pgvector adapter expects list -> cast to string '[...]'
-                    vec_sql = f"[{','.join(str(v) for v in vec)}]" if vec else None
+                    vec_sql = (
+                        f"[{','.join(str(v) for v in vec)}]" if vec is not None else None
+                    )
                     cur.execute(f"""
                         INSERT INTO {self._schema}.chunks (
                             chunk_id, release_id, source_version_id,
                             source_locator, ordinal, content_hash,
                             chunker_version, embedding, created_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, now())
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s,
+                                  %s::vector, now())
                         ON CONFLICT (chunk_id) DO NOTHING
                     """, (
                         chunk.chunk_id,
@@ -151,10 +211,11 @@ class PostgresCorpusStore:
                         chunk.chunker_version,
                         vec_sql,
                     ))
+
             conn.commit()
 
     def activate_release(self, release_id: str, activated_at: str) -> None:
-        """Atomically swap the active-release pointer."""
+        """Atomically swap the active-release pointer and emit usage outbox event."""
         with self._connect() as conn:
             with conn.cursor() as cur:
                 # Mark release activated
@@ -163,14 +224,46 @@ class PostgresCorpusStore:
                     SET activated_at = %s
                     WHERE release_id = %s
                 """, (activated_at, release_id))
-                # Upsert the singleton active-release row
+
+                # Upsert singleton active-release pointer
                 cur.execute(f"""
                     INSERT INTO {self._schema}.active_release (singleton, release_id, activated_at)
                     VALUES (TRUE, %s, %s)
                     ON CONFLICT (singleton) DO UPDATE
-                        SET release_id = EXCLUDED.release_id,
+                        SET release_id   = EXCLUDED.release_id,
                             activated_at = EXCLUDED.activated_at
                 """, (release_id, activated_at))
+
+                # Emit content-free publication event to usage_outbox
+                # (audience, process, content_type tags only — no content)
+                audience = self._schema.split("_", 1)[1]
+                seq_ref = f"pub_{uuid.uuid4().hex}"
+                cur.execute(f"""
+                    INSERT INTO {self._schema}.usage_sequences
+                        (usage_ref, customer_id, audience, process, content_type, expires_at)
+                    VALUES (%s, 'system', %s, 'publication', 'event',
+                            now() + interval '7 years')
+                """, (seq_ref, audience))
+
+                event_id = f"evt_{uuid.uuid4().hex}"
+                idem_key = f"activate_{release_id}"
+                cur.execute(f"""
+                    INSERT INTO {self._schema}.usage_events
+                        (usage_event_id, usage_ref, customer_id, idempotency_key,
+                         event_type, process, content_type)
+                    VALUES (%s, %s, 'system', %s, 'initial', 'publication', 'event')
+                    ON CONFLICT (customer_id, idempotency_key) DO NOTHING
+                """, (event_id, seq_ref, idem_key))
+
+                cur.execute(f"""
+                    INSERT INTO {self._schema}.usage_outbox (usage_event_id, created_at)
+                    SELECT %s, now()
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {self._schema}.usage_outbox
+                        WHERE usage_event_id = %s
+                    )
+                """, (event_id, event_id))
+
             conn.commit()
 
     def rollback_release(self, release_id: str, activated_at: str) -> None:
@@ -187,6 +280,42 @@ class PostgresCorpusStore:
                     WHERE source_version_id = %s
                 """, (state, source_version_id))
             conn.commit()
+
+    def search(
+        self,
+        vector: list[float],
+        process: str,
+        content_type: str,
+        limit: int = 5,
+    ) -> list[dict]:
+        """HNSW vector search over the active release.
+
+        Returns list of dicts with: source_version_id, source_locator,
+        content_hash, similarity. Content text is never returned — callers
+        must load it from the canonical origin if needed (ADR-0005 §11).
+
+        Skips chunks from suspended/withdrawn source versions.
+        """
+        vec_sql = f"[{','.join(str(v) for v in vector)}]"
+        with self._connect() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"""
+                    SELECT
+                        c.chunk_id,
+                        c.source_version_id,
+                        c.source_locator,
+                        c.content_hash,
+                        1 - (c.embedding <=> %s::vector) AS similarity
+                    FROM {self._schema}.chunks c
+                    JOIN {self._schema}.active_release ar ON TRUE
+                    JOIN {self._schema}.source_versions sv
+                        ON sv.source_version_id = c.source_version_id
+                    WHERE c.release_id = ar.release_id
+                      AND sv.global_state = 'valid'
+                    ORDER BY c.embedding <=> %s::vector
+                    LIMIT %s
+                """, (vec_sql, vec_sql, limit))
+                return [dict(row) for row in cur.fetchall()]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -205,6 +334,8 @@ class PostgresCorpusStore:
             embedding_model_id=row["embedding_model_id"],
             build_status=row["build_status"],
             validation_status=row["validation_status"],
-            activated_at=row["activated_at"].isoformat() if row.get("activated_at") else None,
+            activated_at=(
+                row["activated_at"].isoformat() if row.get("activated_at") else None
+            ),
             chunk_count=row.get("chunk_count", 0),
         )
