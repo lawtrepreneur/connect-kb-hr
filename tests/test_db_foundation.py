@@ -287,3 +287,64 @@ def test_postgres_store_target_schema_version(migrated_db):
     from connect_kb_hr.db.postgres_store import PostgresCorpusStore
     store = PostgresCorpusStore(dsn=migrated_db, schema="hr_employer")
     assert store.target_schema_version() == "1.0"
+
+
+# ---------------------------------------------------------------------------
+# AC: Real role execution tests (require distinct login DSNs)
+# These tests prove isolation by executing queries under the actual roles,
+# not by inspecting information_schema grant rows.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not os.environ.get("CORPUS_HR_TEST_DSN") or not os.environ.get("CORPUS_HR_POLICY_DSN"),
+    reason="requires live DB (CORPUS_HR_TEST_DSN) and hr_policy_runtime login (CORPUS_HR_POLICY_DSN)",
+)
+def test_policy_runtime_can_write_usage_but_not_read_chunks():
+    """hr_policy_runtime can write to usage tables but cannot SELECT from chunks."""
+    import psycopg2
+    import psycopg2.errors
+    import uuid
+
+    policy_dsn = os.environ["CORPUS_HR_POLICY_DSN"]
+    conn = psycopg2.connect(policy_dsn)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            # Should succeed: INSERT into usage_sequences
+            usage_ref = f"test_{uuid.uuid4().hex}"
+            cur.execute(
+                """
+                INSERT INTO hr_employer.usage_sequences
+                    (usage_ref, customer_id, audience, process, content_type, expires_at)
+                VALUES (%s, 'system', 'employer', 'hiring', 'question',
+                        now() + interval '1 day')
+                """,
+                (usage_ref,),
+            )
+        conn.rollback()  # clean up — don't persist test data
+
+        # Should fail: SELECT from chunks (no corpus table access)
+        with conn.cursor() as cur:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cur.execute("SELECT 1 FROM hr_employer.chunks LIMIT 1")
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("CORPUS_HR_TEST_DSN") or not os.environ.get("CORPUS_HR_EMPLOYER_DSN"),
+    reason="requires live DB (CORPUS_HR_TEST_DSN) and hr_employer_reader login (CORPUS_HR_EMPLOYER_DSN)",
+)
+def test_employer_reader_cannot_see_employee_schema():
+    """hr_employer_reader cannot SELECT from the hr_employee schema."""
+    import psycopg2
+    import psycopg2.errors
+
+    employer_dsn = os.environ["CORPUS_HR_EMPLOYER_DSN"]
+    conn = psycopg2.connect(employer_dsn)
+    try:
+        with conn.cursor() as cur:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cur.execute("SELECT 1 FROM hr_employee.chunks LIMIT 1")
+    finally:
+        conn.close()
