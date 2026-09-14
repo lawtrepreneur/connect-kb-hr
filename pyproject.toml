@@ -1,0 +1,24 @@
+[project]
+name = "connect-kb-hr"
+version = "0.1.0"
+description = "HR knowledge publication pipeline: compile kb-hr into pgvector releases for mcp-hr"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/connect_kb_hr"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
