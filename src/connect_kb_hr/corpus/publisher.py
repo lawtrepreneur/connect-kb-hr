@@ -86,8 +86,13 @@ class CorpusStore(Protocol):
         """Return all validated releases, newest first (for rollback)."""
         ...
 
-    def write_release(self, release: Release, chunks: Sequence[Chunk], embeddings: Mapping[str, list[float]]) -> None:
-        """Persist a built release and its chunks/embeddings (unactivated)."""
+    def write_release(self, release: Release, chunks: Sequence[Chunk], embeddings: Mapping[str, list[float]], manifests: Sequence[CorpusManifest] | None = None) -> None:
+        """Persist a built release and its chunks/embeddings (unactivated).
+
+        ``manifests`` is optional but required for source/source_version FK parents
+        to be written. Without it, chunk inserts will fail FK constraints if the
+        source_version rows do not already exist.
+        """
         ...
 
     def activate_release(self, release_id: str, activated_at: str) -> None:
@@ -279,7 +284,7 @@ class CorpusPublisher:
 
         # 8. Persist and atomically activate.
         try:
-            store.write_release(release, chunks, embeddings)
+            store.write_release(release, chunks, embeddings, manifests=list(manifests))
             activated = ReleaseBuilder().with_activation(release, activated_at=self._clock())
             store.activate_release(activated.release_id, activated.activated_at or "")
         except Exception as exc:
