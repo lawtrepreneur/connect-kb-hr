@@ -4,7 +4,16 @@ version = "0.1.0"
 description = "HR knowledge publication pipeline: compile kb-hr into pgvector releases for mcp-hr"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "psycopg2-binary>=2.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jsonschema>=4.0",
+    "pytest>=8.0",
+    "pyyaml>=6.0",
+]
 
 [build-system]
 requires = ["hatchling"]
