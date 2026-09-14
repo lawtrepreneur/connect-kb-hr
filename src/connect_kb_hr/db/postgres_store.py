@@ -215,7 +215,12 @@ class PostgresCorpusStore:
             conn.commit()
 
     def activate_release(self, release_id: str, activated_at: str) -> None:
-        """Atomically swap the active-release pointer and emit usage outbox event."""
+        """Atomically swap the active-release pointer and emit usage outbox event.
+
+        Idempotent: repeated calls for the same release_id are safe. If an
+        activation outbox event already exists for this release, the active-release
+        pointer is updated but no duplicate event is emitted.
+        """
         with self._connect() as conn:
             with conn.cursor() as cur:
                 # Mark release activated
@@ -234,35 +239,46 @@ class PostgresCorpusStore:
                             activated_at = EXCLUDED.activated_at
                 """, (release_id, activated_at))
 
-                # Emit content-free publication event to usage_outbox
-                # (audience, process, content_type tags only — no content)
-                audience = self._schema.split("_", 1)[1]
-                seq_ref = f"pub_{uuid.uuid4().hex}"
-                cur.execute(f"""
-                    INSERT INTO {self._schema}.usage_sequences
-                        (usage_ref, customer_id, audience, process, content_type, expires_at)
-                    VALUES (%s, 'system', %s, 'publication', 'event',
-                            now() + interval '7 years')
-                """, (seq_ref, audience))
-
-                event_id = f"evt_{uuid.uuid4().hex}"
+                # Emit content-free publication event to usage_outbox — idempotent.
+                # Check whether an activation event for this release already exists
+                # before inserting to avoid duplicate sequences and events.
                 idem_key = f"activate_{release_id}"
                 cur.execute(f"""
-                    INSERT INTO {self._schema}.usage_events
-                        (usage_event_id, usage_ref, customer_id, idempotency_key,
-                         event_type, process, content_type)
-                    VALUES (%s, %s, 'system', %s, 'initial', 'publication', 'event')
-                    ON CONFLICT (customer_id, idempotency_key) DO NOTHING
-                """, (event_id, seq_ref, idem_key))
+                    SELECT ue.usage_event_id
+                    FROM {self._schema}.usage_events ue
+                    WHERE ue.customer_id = 'system'
+                      AND ue.idempotency_key = %s
+                    LIMIT 1
+                """, (idem_key,))
+                existing = cur.fetchone()
 
-                cur.execute(f"""
-                    INSERT INTO {self._schema}.usage_outbox (usage_event_id, created_at)
-                    SELECT %s, now()
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM {self._schema}.usage_outbox
-                        WHERE usage_event_id = %s
-                    )
-                """, (event_id, event_id))
+                if existing is None:
+                    audience = self._schema.split("_", 1)[1]
+                    seq_ref = f"pub_{uuid.uuid4().hex}"
+                    cur.execute(f"""
+                        INSERT INTO {self._schema}.usage_sequences
+                            (usage_ref, customer_id, audience, process, content_type, expires_at)
+                        VALUES (%s, 'system', %s, 'publication', 'event',
+                                now() + interval '7 years')
+                    """, (seq_ref, audience))
+
+                    event_id = f"evt_{uuid.uuid4().hex}"
+                    cur.execute(f"""
+                        INSERT INTO {self._schema}.usage_events
+                            (usage_event_id, usage_ref, customer_id, idempotency_key,
+                             event_type, process, content_type)
+                        VALUES (%s, %s, 'system', %s, 'initial', 'publication', 'event')
+                        ON CONFLICT (customer_id, idempotency_key) DO NOTHING
+                    """, (event_id, seq_ref, idem_key))
+
+                    cur.execute(f"""
+                        INSERT INTO {self._schema}.usage_outbox (usage_event_id, created_at)
+                        SELECT %s, now()
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM {self._schema}.usage_outbox
+                            WHERE usage_event_id = %s
+                        )
+                    """, (event_id, event_id))
 
             conn.commit()
 
@@ -295,6 +311,15 @@ class PostgresCorpusStore:
         must load it from the canonical origin if needed (ADR-0005 §11).
 
         Skips chunks from suspended/withdrawn source versions.
+
+        NOTE — process/content_type filtering (tech debt):
+        The ``process`` and ``content_type`` parameters are accepted but not
+        yet applied in the SQL query. Filtering requires a release-policy table
+        that maps (release_id, source_version_id, process, content_type) tuples
+        — populated from the compiled approval artifact produced by kb-hr's
+        compile_approvals.py compiler. Until that table exists and is populated
+        by the publisher, all active-release chunks are returned regardless of
+        process/content_type. Tracked in connect-kb-hr#2.
         """
         vec_sql = f"[{','.join(str(v) for v in vector)}]"
         with self._connect() as conn:
