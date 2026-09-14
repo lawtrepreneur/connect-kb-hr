@@ -36,8 +36,9 @@ END $$;
 -- ---------------------------------------------------------------------------
 
 CREATE SCHEMA IF NOT EXISTS hr_employer;
-GRANT USAGE ON SCHEMA hr_employer TO hr_publisher, hr_employer_reader;
--- hr_employee_reader and hr_policy_runtime deliberately NOT granted hr_employer usage
+GRANT USAGE ON SCHEMA hr_employer TO hr_publisher, hr_employer_reader, hr_policy_runtime;
+-- hr_employee_reader deliberately NOT granted hr_employer usage
+-- hr_policy_runtime gets SCHEMA USAGE only (no corpus table access — usage tables only)
 
 -- Enable pgvector in this database (idempotent)
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -184,8 +185,9 @@ CREATE TABLE IF NOT EXISTS hr_employer.usage_outbox (
 -- ---------------------------------------------------------------------------
 
 CREATE SCHEMA IF NOT EXISTS hr_employee;
-GRANT USAGE ON SCHEMA hr_employee TO hr_publisher, hr_employee_reader;
+GRANT USAGE ON SCHEMA hr_employee TO hr_publisher, hr_employee_reader, hr_policy_runtime;
 -- hr_employer_reader deliberately NOT granted hr_employee usage
+-- hr_policy_runtime gets SCHEMA USAGE only (no corpus table access — usage tables only)
 
 CREATE TABLE IF NOT EXISTS hr_employee.schema_version (
     version         TEXT        NOT NULL,
