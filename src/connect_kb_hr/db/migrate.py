@@ -6,7 +6,7 @@ Idempotent: tracks applied migrations in a _migrations table in the public schem
 Usage:
     python3 -m connect_kb_hr.db.migrate --dsn postgresql://... up
     python3 -m connect_kb_hr.db.migrate --dsn postgresql://... down  # last migration only
-    CORPUS_HR_EMPLOYER_DSN=postgresql://... python3 -m connect_kb_hr.db.migrate up
+    CORPUS_HR_DSN=postgresql://... python3 -m connect_kb_hr.db.migrate up
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ MIGRATIONS_DIR = pathlib.Path(__file__).parent.parent.parent.parent.parent / "mi
 
 
 def _get_dsn(args) -> str:
-    dsn = getattr(args, "dsn", None) or os.environ.get("CORPUS_HR_EMPLOYER_DSN", "")
+    dsn = getattr(args, "dsn", None) or os.environ.get("CORPUS_HR_DSN", "")
     if not dsn:
-        print("ERROR: --dsn or CORPUS_HR_EMPLOYER_DSN required", file=sys.stderr)
+        print("ERROR: --dsn or CORPUS_HR_DSN required", file=sys.stderr)
         sys.exit(1)
     return dsn
 
@@ -107,7 +107,7 @@ def run_down(dsn: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="connect-kb-hr migration runner")
-    parser.add_argument("--dsn", help="PostgreSQL DSN (default: CORPUS_HR_EMPLOYER_DSN env var)")
+    parser.add_argument("--dsn", help="PostgreSQL DSN (default: CORPUS_HR_DSN env var)")
     parser.add_argument("direction", choices=["up", "down"], help="up: apply; down: rollback last")
     args = parser.parse_args()
     dsn = _get_dsn(args)
