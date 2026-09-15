@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
-from typing import Literal, Mapping, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Literal
 
 GlobalState = Literal["valid", "suspended", "withdrawn", "superseded"]
 

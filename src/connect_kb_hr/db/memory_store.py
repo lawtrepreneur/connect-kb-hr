@@ -10,10 +10,9 @@ mirroring the SQL join in PostgresCorpusStore.
 from __future__ import annotations
 
 import math
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from connect_kb_hr.corpus.chunker import Chunk
-from connect_kb_hr.corpus.publisher import CorpusStore
 from connect_kb_hr.corpus.release import Release
 
 SUPPORTED_SCHEMA_VERSION = "1.0"

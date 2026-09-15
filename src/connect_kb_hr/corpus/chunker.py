@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 CHUNKER_VERSION = "1.0"
 

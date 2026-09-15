@@ -47,7 +47,7 @@ class TargetConfig:
             )
 
     @classmethod
-    def from_env(cls, product: str) -> "TargetConfig":
+    def from_env(cls, product: str) -> TargetConfig:
         """Build a target from environment variables.
 
         Reads ``CORPUS_<PRODUCT>_DSN`` and

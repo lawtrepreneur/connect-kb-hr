@@ -15,15 +15,14 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 
 import psycopg2
 import psycopg2.extras
 
 from connect_kb_hr.corpus.chunker import Chunk
 from connect_kb_hr.corpus.manifest import CorpusManifest
-from connect_kb_hr.corpus.publisher import CorpusStore
 from connect_kb_hr.corpus.release import Release
 
 # Schema version this adapter was written against.
@@ -32,7 +31,7 @@ SUPPORTED_SCHEMA_VERSION = "1.0"
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class PostgresCorpusStore:
@@ -52,7 +51,7 @@ class PostgresCorpusStore:
         return f"PostgresCorpusStore(schema={self._schema!r}, dsn=<redacted>)"
 
     @classmethod
-    def from_env(cls, product: str = "hr") -> "PostgresCorpusStore":
+    def from_env(cls, product: str = "hr") -> PostgresCorpusStore:
         """Build a store from CORPUS_{PRODUCT}_DSN env var."""
         key = f"CORPUS_{product.upper()}_DSN"
         dsn = os.environ.get(key, "")
@@ -251,6 +250,13 @@ class PostgresCorpusStore:
         Idempotent: repeated calls for the same release_id are safe. If an
         activation outbox event already exists for this release, the active-release
         pointer is updated but no duplicate event is emitted.
+
+        NOTE: This method writes a content-free system event to hr_policy.usage_events
+        and hr_policy.usage_outbox. The connecting role must therefore hold INSERT on
+        those tables in addition to the kb schema grants (hr_policy_writer or equivalent).
+        The migration grants these to hr_policy_writer; ensure the publisher DSN connects
+        as a role that inherits both hr_publisher and hr_policy_writer, or grant them
+        explicitly to the publisher role.
         """
         with self._connect() as conn:
             with conn.cursor() as cur:

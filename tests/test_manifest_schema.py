@@ -11,10 +11,8 @@ Validates:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import pathlib
-import sys
 
 import pytest
 

@@ -12,10 +12,9 @@ verifiable via policy_hash.
 from __future__ import annotations
 
 import hashlib
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
 
 from connect_kb_hr.corpus.chunker import Chunk
 from connect_kb_hr.corpus.manifest import CorpusManifest
@@ -99,7 +98,7 @@ class Release:
         }
 
     @staticmethod
-    def from_dict(data: dict[str, Any]) -> "Release":
+    def from_dict(data: dict[str, Any]) -> Release:
         """Reconstruct from a dict (for migrations)."""
         return Release(
             release_id=data["release_id"],
@@ -155,9 +154,7 @@ class ReleaseBuilder:
         embedding_model_id = manifests[0].embedding_model_id
 
         release_id = _sha256_hex(
-            f"{publication_run_id}|{product}|{manifest_hash}|{policy_hash}|{chunker_version}|{embedding_model_id}".encode(
-                "utf-8"
-            )
+            f"{publication_run_id}|{product}|{manifest_hash}|{policy_hash}|{chunker_version}|{embedding_model_id}".encode()
         )
 
         return Release(

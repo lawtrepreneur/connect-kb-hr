@@ -343,8 +343,9 @@ _DSN = os.environ.get("CORPUS_HR_TEST_DSN", "")
 @pytest.fixture(scope="module")
 def pg_store():
     """Fresh PostgresCorpusStore backed by the real hr_kb database."""
-    from connect_kb_hr.db.postgres_store import PostgresCorpusStore
     import psycopg2
+
+    from connect_kb_hr.db.postgres_store import PostgresCorpusStore
 
     store = PostgresCorpusStore(dsn=_DSN, schema="kb")
     # Teardown: drop schemas and recreate from migration for isolation
@@ -440,7 +441,7 @@ def test_pg_cross_audience_excluded(pg_store):
         audience="employee",
         limit=5,
     )
-    chunk_ids = {r["chunk_id"] for r in results}
+    _ = {r["chunk_id"] for r in results}
     # No chunk from the employer-only source should appear
     assert all("src-empr-x" not in r.get("source_version_id", "") for r in results)
 

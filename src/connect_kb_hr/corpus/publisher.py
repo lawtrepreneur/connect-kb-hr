@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Callable, Mapping, Protocol, Sequence
+from datetime import UTC, datetime
+from typing import Protocol
 
 from .audit import PublicationEvent, PublicationEventLog
 from .chunker import Chunk, DeterministicChunker
@@ -41,7 +42,7 @@ from .target import TargetConfig
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _sha256_hex(data: bytes) -> str:

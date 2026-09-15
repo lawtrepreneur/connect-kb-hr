@@ -11,8 +11,9 @@ the same PublicationEventLog protocol.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, Sequence
+from typing import Literal, Protocol
 
 EventKind = Literal[
     "build_started",

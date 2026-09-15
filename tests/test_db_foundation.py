@@ -10,29 +10,24 @@ These tests verify the unified-corpus schema:
 """
 
 import os
-import pytest
-import psycopg2
-from psycopg2.extensions import connection, cursor
 
-DB_NAME = "hr_kb"
-DB_USER = "legalxmcp"
-DB_PASS = "19a7567098f2c115ea920649cd58696f6cb02129"
-DB_HOST = "127.0.0.1"
-DB_PORT = 5435
+import psycopg2
+import pytest
 
 
 def get_connection() -> "psycopg2.extensions.connection":
-    """Return a connection to the test database."""
+    """Return a connection to the test database.
+
+    Requires CORPUS_HR_TEST_DSN to be set in the environment, e.g.:
+        CORPUS_HR_TEST_DSN=postgresql://user:pass@127.0.0.1:5435/hr_kb
+
+    Never hardcode credentials here — rotate any credential that was
+    previously committed to this file.
+    """
     dsn = os.environ.get("CORPUS_HR_TEST_DSN", "")
     if not dsn:
         pytest.skip("CORPUS_HR_TEST_DSN not set; skipping db tests")
-    return psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        host=DB_HOST,
-        port=DB_PORT,
-    )
+    return psycopg2.connect(dsn)
 
 
 @pytest.fixture(scope="function")
