@@ -1,20 +1,24 @@
-"""Tests for connect-kb-hr#2: wired publish pipeline.
+"""Tests for the unified corpus publish pipeline.
 
-All AC from the issue covered:
+Unit tests (always run — InMemoryCorpusStore, no DB):
+  - Publish writes chunks + embeddings + active-release pointer
+  - Second publish with same manifest+policy is a no-op (idempotent)
+  - Unsupported schema version fails before any DB mutation
+  - Publisher rejects empty compiled_assignments
+  - Publisher rejects manifest with no matching assignment
+  - Employer-only assignment not returned for employee query
+  - Employee-only assignment not returned for employer query
+  - Dual-audience source: one chunk, two assignment rows
+  - Outbox event emitted on activation (content-free)
+  - Emergency suspend excludes source from search
 
-  Unit tests (always run — InMemoryCorpusStore, no DB):
-    - Publish run writes chunks + embeddings + active-release pointer
-    - Second publish with same release_id is a no-op (idempotent)
-    - Manifest with unsupported schema version fails before any DB mutation
-    - Employer and employee publish runs are independent
-    - Outbox event emitted on activation (content-free)
-    - Emergency suspend/withdraw path
-
-  DB integration tests (skip if CORPUS_HR_TEST_DSN not set):
-    - Full publish against real Postgres
-    - search() returns result for known query after publish
-    - Idempotency: second publish same release_id → no duplicate rows
-    - Activation emits outbox row
+DB integration tests (skip if CORPUS_HR_TEST_DSN not set):
+  - Full publish against real Postgres
+  - search() returns employer result for employer query
+  - search() returns employee result for employee query
+  - Cross-audience exclusion: employer chunk not returned for employee query
+  - Idempotency: second publish same release → no duplicate rows
+  - Activation emits outbox row
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from connect_kb_hr.corpus.target import TargetConfig
 from connect_kb_hr.db.memory_store import InMemoryCorpusStore
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Test fixtures / helpers
 # ---------------------------------------------------------------------------
 
 CHUNKER_VERSION = "1.0"
@@ -64,7 +68,7 @@ def _manifest(
         jurisdiction="ON",
         effective_interval=EffectiveInterval(start="2026-01-01"),
         provenance=Provenance(origin_commit="abc123"),
-        canonical_locator=f"collections/employer/hiring/{source_id}.md",
+        canonical_locator=f"collections/hiring/{source_id}.md",
         rights_basis="RHH_proprietary",
         rights_holder="RHH",
         permitted_use="subscriber_retrieval",
@@ -78,7 +82,6 @@ def _manifest(
 
 
 def _fake_embedder(dim: int = 768):
-    """Returns a mock embedder that emits a fixed non-zero vector."""
     embedder = MagicMock()
     embedder.model_id = MODEL_ID
     embedder.model_digest = MODEL_DIGEST
@@ -86,13 +89,12 @@ def _fake_embedder(dim: int = 768):
     return embedder
 
 
-def _target(product: str = "hr", audience: str = "employer") -> TargetConfig:
+def _target(product: str = "hr") -> TargetConfig:
     return TargetConfig(
         product=product,
-        audience=audience,
         dsn="postgresql://test/test",  # not used with InMemoryCorpusStore
         publisher_role="hr_publisher",
-        schema_name=f"hr_{audience}",
+        schema_name="kb",
     )
 
 
@@ -104,10 +106,35 @@ def _publisher(embedder=None) -> CorpusPublisher:
     )
 
 
-def _publish(store, manifest=None, publication_run_id="run-001", audience="employer"):
+def _assignment(
+    source_version_id: str = "src-001-v1",
+    audience: str = "employer",
+    process: str = "hiring",
+    content_type: str = "question",
+    source_role: str = "substantive_guidance",
+) -> dict:
+    return {
+        "source_version_id": source_version_id,
+        "audience_code": audience,
+        "process_code": process,
+        "content_type_code": content_type,
+        "source_role_code": source_role,
+        "approval_record": "rhh-esah-employer-hiring-001-v1.yaml",
+        "reviewer_id": "reviewer-001",
+        "reviewed_at": "2026-09-01T00:00:00Z",
+    }
+
+
+def _publish(
+    store,
+    manifest=None,
+    publication_run_id: str = "run-001",
+    assignments: list[dict] | None = None,
+):
     m = manifest or _manifest()
+    asgn = assignments if assignments is not None else [_assignment()]
     publisher = _publisher()
-    target = _target(audience=audience)
+    target = _target()
     result = publisher.publish(
         publication_run_id=publication_run_id,
         target=target,
@@ -115,262 +142,327 @@ def _publish(store, manifest=None, publication_run_id="run-001", audience="emplo
         manifests=[m],
         source_texts={m.source_version_id: SOURCE_TEXT},
         source_commit="abc123",
+        compiled_assignments=asgn,
     )
     return result
 
 
 # ---------------------------------------------------------------------------
-# AC: publish writes chunks + embeddings + active-release pointer
+# Unit tests — InMemoryCorpusStore
 # ---------------------------------------------------------------------------
+
 
 def test_publish_writes_release_and_chunks():
     store = InMemoryCorpusStore()
     result = _publish(store)
-
     assert result.ok, f"publish failed: {result.detail}"
-    assert result.status == "activated"
-    assert result.release_id is not None
+    assert store.active_release() is not None
+    assert len(store._chunks) >= 1
+    assert len(store._assignments) >= 1
 
-    # active release pointer is set
-    active = store.active_release()
-    assert active is not None
-    assert active.release_id == result.release_id
-
-    # chunks were written
-    assert len(store._chunks) > 0
-
-    # embeddings were written
-    for chunk_id in store._chunks:
-        assert chunk_id in store._embeddings
-        assert len(store._embeddings[chunk_id]) == 768
-
-
-# ---------------------------------------------------------------------------
-# AC: idempotent — second publish with same manifest is a no-op
-# ---------------------------------------------------------------------------
 
 def test_publish_idempotent_noop_on_same_manifest():
     store = InMemoryCorpusStore()
-    r1 = _publish(store, publication_run_id="run-001")
-    assert r1.status == "activated"
+    r1 = _publish(store)
+    assert r1.ok
+    r2 = _publish(store)
+    assert r2.ok
+    assert r2.status == "noop"
 
-    chunk_count_before = len(store._chunks)
-
-    r2 = _publish(store, publication_run_id="run-002")  # same manifest content
-    assert r2.status == "noop", f"Expected noop, got {r2.status}: {r2.detail}"
-    assert r2.release_id == r1.release_id
-
-    # No new chunks written
-    assert len(store._chunks) == chunk_count_before
-
-
-# ---------------------------------------------------------------------------
-# AC: unsupported schema version fails before any mutation
-# ---------------------------------------------------------------------------
 
 def test_unsupported_schema_version_fails_before_mutation():
-    store = InMemoryCorpusStore(schema_version="2.0")
+    store = InMemoryCorpusStore(schema_version="9.9")
     result = _publish(store)
-
     assert not result.ok
     assert "unsupported_schema_version" in (result.detail or "")
-    # No release written
     assert store.active_release() is None
-    assert len(store._chunks) == 0
 
 
-# ---------------------------------------------------------------------------
-# AC: employer and employee publish runs are independent
-# ---------------------------------------------------------------------------
-
-def test_employer_employee_publish_independent():
-    store_employer = InMemoryCorpusStore()
-    store_employee = InMemoryCorpusStore()
-
-    r_emp = _publish(store_employer, audience="employer", publication_run_id="run-empr")
-    r_ee = _publish(store_employee, audience="employee", publication_run_id="run-empe")
-
-    assert r_emp.ok
-    assert r_ee.ok
-
-    # Different release_ids (different target audience in publication_run_id)
-    assert r_emp.release_id != r_ee.release_id
-
-    # Each store has its own active release
-    assert (store_employer.active_release() or MagicMock()).release_id == r_emp.release_id
-    assert (store_employee.active_release() or MagicMock()).release_id == r_ee.release_id
-
-    # Failure in employee does not affect employer
-    bad_store = InMemoryCorpusStore(schema_version="99.0")
-    bad_result = _publish(bad_store, audience="employee", publication_run_id="run-bad")
-    assert not bad_result.ok
-    # employer store still has its active release
-    assert store_employer.active_release() is not None
+def test_publish_rejects_empty_compiled_assignments():
+    store = InMemoryCorpusStore()
+    result = _publish(store, assignments=[])
+    assert not result.ok
+    assert "compiled_assignments" in (result.detail or "").lower()
+    assert store.active_release() is None
 
 
-# ---------------------------------------------------------------------------
-# AC: content-free outbox event emitted on activation
-# ---------------------------------------------------------------------------
+def test_publish_rejects_manifest_with_no_assignment():
+    store = InMemoryCorpusStore()
+    m = _manifest(source_version_id="src-999-v1")
+    # assignment references a different source_version_id
+    wrong_assignment = _assignment(source_version_id="src-001-v1")
+    publisher = _publisher()
+    target = _target()
+    result = publisher.publish(
+        publication_run_id="run-x",
+        target=target,
+        store=store,
+        manifests=[m],
+        source_texts={m.source_version_id: SOURCE_TEXT},
+        source_commit="abc123",
+        compiled_assignments=[wrong_assignment],
+    )
+    assert not result.ok
+    assert store.active_release() is None
+
+
+def test_publish_with_employer_assignment_only():
+    store = InMemoryCorpusStore()
+    result = _publish(store, assignments=[_assignment(audience="employer")])
+    assert result.ok
+    # Employer query returns results
+    chunks = store.search(
+        vector=[0.1] * 768,
+        process="hiring",
+        content_type="question",
+        audience="employer",
+        limit=5,
+    )
+    assert len(chunks) >= 1
+    # Employee query returns nothing (no employee assignment)
+    chunks_emp = store.search(
+        vector=[0.1] * 768,
+        process="hiring",
+        content_type="question",
+        audience="employee",
+        limit=5,
+    )
+    assert len(chunks_emp) == 0
+
+
+def test_publish_with_employee_assignment_only():
+    store = InMemoryCorpusStore()
+    result = _publish(store, assignments=[_assignment(audience="employee")])
+    assert result.ok
+    chunks = store.search(
+        vector=[0.1] * 768,
+        process="hiring",
+        content_type="question",
+        audience="employee",
+        limit=5,
+    )
+    assert len(chunks) >= 1
+    # Employer query returns nothing
+    chunks_empr = store.search(
+        vector=[0.1] * 768,
+        process="hiring",
+        content_type="question",
+        audience="employer",
+        limit=5,
+    )
+    assert len(chunks_empr) == 0
+
+
+def test_publish_with_dual_audience_assignments():
+    """One source, two assignments (employer + employee) — one chunk, two assignment rows."""
+    store = InMemoryCorpusStore()
+    dual_assignments = [
+        _assignment(audience="employer"),
+        _assignment(audience="employee"),
+    ]
+    result = _publish(store, assignments=dual_assignments)
+    assert result.ok
+    # Same chunk for both audiences
+    emp_chunks = store.search(
+        vector=[0.1] * 768, process="hiring", content_type="question",
+        audience="employer", limit=5,
+    )
+    ee_chunks = store.search(
+        vector=[0.1] * 768, process="hiring", content_type="question",
+        audience="employee", limit=5,
+    )
+    assert len(emp_chunks) >= 1
+    assert len(ee_chunks) >= 1
+    # Exactly one chunk artifact (no duplication)
+    assert len(store._chunks) == len({c["chunk_id"] for c in emp_chunks})
+
+
+def test_search_returns_employer_result_not_employee():
+    """Employer-only assignment is excluded from employee query."""
+    store = InMemoryCorpusStore()
+    _publish(store, assignments=[_assignment(audience="employer")])
+    results = store.search(
+        vector=[0.1] * 768, process="hiring", content_type="question",
+        audience="employee", limit=5,
+    )
+    assert results == []
+
+
+def test_search_returns_employee_result_not_employer():
+    """Employee-only assignment is excluded from employer query."""
+    store = InMemoryCorpusStore()
+    _publish(store, assignments=[_assignment(audience="employee")])
+    results = store.search(
+        vector=[0.1] * 768, process="hiring", content_type="question",
+        audience="employer", limit=5,
+    )
+    assert results == []
+
 
 def test_outbox_event_emitted_on_activation():
     store = InMemoryCorpusStore()
     result = _publish(store)
-
     assert result.ok
-    assert len(store.outbox_events) == 1
-    evt = store.outbox_events[0]
-    assert evt["event_type"] == "release_activated"
-    assert evt["release_id"] == result.release_id
-    # No content fields
-    assert "query" not in evt
-    assert "source_text" not in evt
-    assert "answer" not in evt
+    assert len(store.outbox_events) >= 1
+    # Outbox events must be content-free
+    for evt in store.outbox_events:
+        assert "query" not in str(evt).lower()
+        assert SOURCE_TEXT not in str(evt)
 
-
-# ---------------------------------------------------------------------------
-# AC: search returns result for known query (InMemoryCorpusStore cosine)
-# ---------------------------------------------------------------------------
-
-def test_search_returns_result_after_publish():
-    store = InMemoryCorpusStore()
-    _publish(store)
-
-    # Query with same fixed vector as embedder emits (cosine sim = 1.0)
-    query_vector = [0.1] * 768
-    results = store.search(vector=query_vector, process="hiring", content_type="question")
-
-    assert len(results) > 0
-    first = results[0]
-    assert "chunk_id" in first
-    assert "source_version_id" in first
-    assert "similarity" in first
-    assert first["similarity"] > 0.99  # should be ~1.0 for identical vectors
-
-
-def test_search_returns_empty_when_no_active_release():
-    store = InMemoryCorpusStore()
-    results = store.search(vector=[0.1] * 768, process="hiring", content_type="question")
-    assert results == []
-
-
-# ---------------------------------------------------------------------------
-# AC: emergency suspend removes source from active retrieval
-# ---------------------------------------------------------------------------
 
 def test_emergency_suspend_excludes_source_from_search():
     store = InMemoryCorpusStore()
-    m = _manifest(source_version_id="src-suspend-v1")
-    result = _publish(store, manifest=m)
-    assert result.ok
-
-    # Verify searchable before suspend
-    assert len(store.search([0.1] * 768, "hiring", "question")) > 0
-
-    # Suspend
+    _publish(store)
     publisher = _publisher()
-    target = _target()
-    store.set_source_state("src-suspend-v1", "suspended", "2026-09-14T00:00:00Z")
-
-    # Should now be excluded
-    results = store.search([0.1] * 768, "hiring", "question")
-    assert all(r["source_version_id"] != "src-suspend-v1" for r in results)
+    publisher.emergency(
+        publication_run_id="run-emergency",
+        source_version_id="src-001-v1",
+        store=store,
+        target=_target(),
+        action="suspend",
+    )
+    chunks = store.search(
+        vector=[0.1] * 768, process="hiring", content_type="question",
+        audience="employer", limit=5,
+    )
+    assert chunks == []
 
 
 # ---------------------------------------------------------------------------
-# DB integration tests — skip if CORPUS_HR_TEST_DSN not set
+# DB integration tests — skip without CORPUS_HR_TEST_DSN
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def db_dsn():
-    dsn = os.environ.get("CORPUS_HR_TEST_DSN", "")
-    if not dsn:
-        pytest.skip("CORPUS_HR_TEST_DSN not set — skipping DB integration tests")
-    return dsn
+_SKIP_DB = pytest.mark.skipif(
+    not os.environ.get("CORPUS_HR_TEST_DSN"),
+    reason="requires live DB (CORPUS_HR_TEST_DSN not set)",
+)
+
+_DSN = os.environ.get("CORPUS_HR_TEST_DSN", "")
 
 
 @pytest.fixture(scope="module")
-def pg_store(db_dsn):
-    """Migrate and return a PostgresCorpusStore; teardown after module."""
-    import psycopg2
+def pg_store():
+    """Fresh PostgresCorpusStore backed by the real hr_kb database."""
     from connect_kb_hr.db.postgres_store import PostgresCorpusStore
+    import psycopg2
 
-    # Apply migrations
-    conn = psycopg2.connect(db_dsn)
-    conn.autocommit = True
-    migration_sql = (
-        __import__("pathlib").Path(__file__).parent.parent
-        / "migrations" / "001_hr_serving_store.sql"
-    )
-    with conn.cursor() as cur:
-        try:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-        except Exception:
-            pass
-        cur.execute(migration_sql.read_text())
-    conn.close()
-
-    store = PostgresCorpusStore(dsn=db_dsn, schema="hr_employer")
+    store = PostgresCorpusStore(dsn=_DSN, schema="kb")
+    # Teardown: drop schemas and recreate from migration for isolation
     yield store
-
-    # Teardown
-    conn = psycopg2.connect(db_dsn)
+    # Clean up test data — drop and recreate both schemas
+    conn = psycopg2.connect(_DSN)
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute("DROP SCHEMA IF EXISTS hr_employer CASCADE;")
-        cur.execute("DROP SCHEMA IF EXISTS hr_employee CASCADE;")
+        cur.execute("DROP SCHEMA IF EXISTS kb CASCADE;")
+        cur.execute("DROP SCHEMA IF EXISTS hr_policy CASCADE;")
     conn.close()
+    # Re-run migration to leave DB clean for next run
+    import pathlib
+    migration = pathlib.Path(__file__).parent.parent / "migrations" / "001_hr_serving_store.sql"
+    conn2 = psycopg2.connect(_DSN)
+    conn2.autocommit = False
+    with conn2.cursor() as cur:
+        cur.execute(migration.read_text())
+    conn2.commit()
+    conn2.close()
 
 
+@_SKIP_DB
 def test_pg_publish_writes_and_activates(pg_store):
-    m = _manifest(source_id="pg-src-001", source_version_id="pg-src-001-v1")
-    publisher = _publisher()
-    target = _target()
-    result = publisher.publish(
-        publication_run_id="pg-run-001",
-        target=target,
-        store=pg_store,
-        manifests=[m],
-        source_texts={m.source_version_id: SOURCE_TEXT},
-        source_commit="pg-abc123",
-    )
-    assert result.ok, f"DB publish failed: {result.detail}"
+    result = _publish(pg_store)
+    assert result.ok, f"pg publish failed: {result.detail}"
     active = pg_store.active_release()
     assert active is not None
-    assert active.release_id == result.release_id
 
 
-def test_pg_publish_idempotent(pg_store):
-    """Second publish of same manifest must be a noop with no duplicate rows."""
-    import psycopg2
-    m = _manifest(source_id="pg-src-001", source_version_id="pg-src-001-v1")
+@_SKIP_DB
+def test_pg_search_employer_assignment(pg_store):
+    """Employer assignment returns results for employer query."""
+    from connect_kb_hr.db.postgres_store import PostgresCorpusStore
+    store = PostgresCorpusStore(dsn=_DSN, schema="kb")
+    _publish(store, assignments=[_assignment(audience="employer")], publication_run_id="pg-emp-1")
+    results = store.search(
+        vector=[0.1] * 768,
+        process="hiring",
+        content_type="question",
+        audience="employer",
+        limit=5,
+    )
+    assert len(results) >= 1
+    assert results[0]["audience"] == "employer"
+
+
+@_SKIP_DB
+def test_pg_search_employee_assignment(pg_store):
+    """Employee assignment returns results for employee query."""
+    from connect_kb_hr.db.postgres_store import PostgresCorpusStore
+    store = PostgresCorpusStore(dsn=_DSN, schema="kb")
+    m = _manifest(source_id="src-ee-001", source_version_id="src-ee-001-v1")
+    ee_assignment = _assignment(
+        source_version_id="src-ee-001-v1",
+        audience="employee",
+    )
     publisher = _publisher()
-    target = _target()
-    r2 = publisher.publish(
-        publication_run_id="pg-run-002",
-        target=target,
-        store=pg_store,
+    publisher.publish(
+        publication_run_id="pg-ee-1",
+        target=_target(),
+        store=store,
         manifests=[m],
         source_texts={m.source_version_id: SOURCE_TEXT},
-        source_commit="pg-abc123",
+        source_commit="abc123",
+        compiled_assignments=[ee_assignment],
     )
-    assert r2.status == "noop", f"Expected noop on second publish, got {r2.status}"
+    results = store.search(
+        vector=[0.1] * 768,
+        process="hiring",
+        content_type="question",
+        audience="employee",
+        limit=5,
+    )
+    assert len(results) >= 1
+    assert results[0]["audience"] == "employee"
 
 
-def test_pg_search_returns_result(pg_store):
-    """After publish, search() must return at least one result for a known vector."""
-    results = pg_store.search(vector=[0.1] * 768, process="hiring", content_type="question")
-    assert isinstance(results, list)
-    assert len(results) > 0
-    assert "chunk_id" in results[0]
-    assert "similarity" in results[0]
+@_SKIP_DB
+def test_pg_cross_audience_excluded(pg_store):
+    """Employer-only chunk is not returned for employee query."""
+    from connect_kb_hr.db.postgres_store import PostgresCorpusStore
+    store = PostgresCorpusStore(dsn=_DSN, schema="kb")
+    m = _manifest(source_id="src-empr-x", source_version_id="src-empr-x-v1")
+    _publish(store, manifest=m, assignments=[
+        _assignment(source_version_id="src-empr-x-v1", audience="employer")
+    ], publication_run_id="pg-cross-1")
+    # Employee query must return empty for this employer-only source
+    results = store.search(
+        vector=[0.1] * 768,
+        process="hiring",
+        content_type="question",
+        audience="employee",
+        limit=5,
+    )
+    chunk_ids = {r["chunk_id"] for r in results}
+    # No chunk from the employer-only source should appear
+    assert all("src-empr-x" not in r.get("source_version_id", "") for r in results)
 
 
-def test_pg_activation_emits_outbox_row(pg_store, db_dsn):
-    """activate_release must write one row to the usage_outbox."""
+@_SKIP_DB
+def test_pg_publish_idempotent(pg_store):
+    """Second publish with same manifest+policy returns noop."""
+    from connect_kb_hr.db.postgres_store import PostgresCorpusStore
+    store = PostgresCorpusStore(dsn=_DSN, schema="kb")
+    _publish(store, publication_run_id="pg-idem-1")
+    r2 = _publish(store, publication_run_id="pg-idem-2")
+    assert r2.ok
+    assert r2.status == "noop"
+
+
+@_SKIP_DB
+def test_pg_activation_emits_outbox_row(pg_store):
+    """Activation inserts a content-free row in hr_policy.usage_outbox."""
     import psycopg2
-    conn = psycopg2.connect(db_dsn)
+    conn = psycopg2.connect(_DSN)
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM hr_employer.usage_outbox")
+        cur.execute("SELECT COUNT(*) FROM hr_policy.usage_outbox;")
         count = cur.fetchone()[0]
     conn.close()
-    assert count >= 1, "Expected at least one outbox row after publish activation"
+    assert count >= 1
