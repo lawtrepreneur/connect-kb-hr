@@ -41,7 +41,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from connect_kb_hr.corpus.audit import InMemoryEventLog
-from connect_kb_hr.corpus.chunker import DeterministicChunker
+from connect_kb_hr.corpus.chunker import CHUNKER_VERSION, DeterministicChunker
 from connect_kb_hr.corpus.manifest import CorpusManifest, EffectiveInterval, Provenance
 from connect_kb_hr.corpus.publisher import CorpusPublisher, _policy_hash
 from connect_kb_hr.corpus.target import TargetConfig
@@ -218,7 +218,7 @@ def _build_manifests(
             global_state=meta.get("publication_status", "valid")
                 if meta.get("publication_status") in ("valid", "suspended", "withdrawn")
                 else "valid",
-            chunker_version="1.0",
+            chunker_version=CHUNKER_VERSION,
             embedding_model_id=embedding_model_id,
             embedding_model_digest=embedding_model_digest,
         )
@@ -319,18 +319,31 @@ def main() -> int:
 
     store = PostgresCorpusStore(dsn=dsn, schema="kb")
 
-    # 4. Build embedder (stub — real embedder would call Ollama/nomic)
-    from unittest.mock import MagicMock
+    # 4. Build embedder — real HTTP call to llama-swap /v1/embeddings.
+    embed_url = os.environ.get(
+        "KNOWLEDGE_EMBED_URL", "https://chat.tail713de8.ts.net/v1/embeddings"
+    )
 
-    embedder = MagicMock()
-    embedder.model_id = embedding_model_id
-    embedder.model_digest = embedding_model_digest
-    embedder.embed.return_value = [0.0] * 768  # placeholder — replace with real embedder
+    class _HttpEmbedder:
+        model_id = embedding_model_id
+        model_digest = embedding_model_digest
+
+        def embed(self, text: str) -> list[float]:
+            import httpx
+            resp = httpx.post(
+                embed_url,
+                json={"model": self.model_id, "input": text},
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            return resp.json()["data"][0]["embedding"]
+
+    embedder = _HttpEmbedder()
 
     event_log = InMemoryEventLog()
     publisher = CorpusPublisher(
         event_log=event_log,
-        chunker=DeterministicChunker(version="1.0"),
+        chunker=DeterministicChunker(version=CHUNKER_VERSION),
         embedder=embedder,
     )
 

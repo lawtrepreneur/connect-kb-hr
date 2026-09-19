@@ -19,11 +19,47 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-CHUNKER_VERSION = "1.0"
+CHUNKER_VERSION = "1.1"
+
+# The llama-swap embedding endpoint caps input at ~508 chars (empirically measured).
+# nomic-embed-text has a 512-token context; with UTF-8 overhead, ~500 chars is safe.
+_MAX_EMBED_CHARS = 500
 
 _SECTION_RE = re.compile(r"^##\s+(.*)$", re.MULTILINE)
 _HEADING_RE = re.compile(r"^#{1,2}\s+(.*)$", re.MULTILINE)
 _PROVISION_RE = re.compile(r"^(?:Section\s+\d+|Part\s+\d+|Schedule\s+\d+)[^\n]*$", re.MULTILINE)
+
+
+def _split_long(text: str, max_chars: int = _MAX_EMBED_CHARS) -> list[str]:
+    """Split a text block that exceeds max_chars at sentence boundaries.
+
+    Falls back to hard splits at max_chars if no sentence boundary is found.
+    Returns the original text in a list when it is within the limit.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    parts: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        # Search for last sentence boundary (. ! ?) before max_chars
+        window = remaining[:max_chars]
+        split_at = max(
+            window.rfind(". "),
+            window.rfind("! "),
+            window.rfind("? "),
+            window.rfind(".\n"),
+        )
+        if split_at > max_chars // 2:
+            # include the punctuation character
+            parts.append(remaining[: split_at + 1].strip())
+            remaining = remaining[split_at + 1 :].strip()
+        else:
+            # no good boundary — hard split at max_chars
+            parts.append(remaining[:max_chars].strip())
+            remaining = remaining[max_chars:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
 
 
 @dataclass(frozen=True)
@@ -102,19 +138,27 @@ class DeterministicChunker:
 
     @staticmethod
     def _split_on(text: str, pattern: re.Pattern[str]) -> list[str]:
-        """Split on section boundaries, keeping the boundary with its body."""
+        """Split on section boundaries, keeping the boundary with its body.
+
+        Sections larger than _MAX_EMBED_CHARS are further sub-split at sentence
+        boundaries so every segment fits within the embedding model's context.
+        """
         matches = list(pattern.finditer(text))
         if not matches:
-            return [text]
-        segments: list[str] = []
+            return _split_long(text)
+        raw: list[str] = []
         if matches[0].start() > 0:
             preamble = text[: matches[0].start()].strip()
             if preamble:
-                segments.append(preamble)
+                raw.append(preamble)
         for i, m in enumerate(matches):
             start = m.start()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            segments.append(text[start:end])
+            raw.append(text[start:end])
+        # Sub-split any segment that exceeds the embedding context window.
+        segments: list[str] = []
+        for seg in raw:
+            segments.extend(_split_long(seg))
         return segments
 
     @staticmethod
