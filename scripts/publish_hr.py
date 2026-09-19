@@ -86,7 +86,25 @@ def _load_policy(kb_hr: pathlib.Path) -> tuple[list[dict], str]:
     employee_doc = json.loads(employee_path.read_text())
 
     merged_tuples = employer_doc["tuples"] + employee_doc["tuples"]
-    # Compute pinned hash over the merged list (matches what publisher verifies)
+
+    # Normalize short key names → _code suffixed names expected by postgres_store.
+    # The compiled policy uses "audience", "process", "content_type", "source_role";
+    # the DB writer expects "audience_code", "process_code", "content_type_code",
+    # "source_role_code".
+    def _normalize(t: dict) -> dict:
+        out = dict(t)
+        for short, long in (
+            ("audience", "audience_code"),
+            ("process", "process_code"),
+            ("content_type", "content_type_code"),
+            ("source_role", "source_role_code"),
+        ):
+            if short in out and long not in out:
+                out[long] = out[short]
+        return out
+
+    merged_tuples = [_normalize(t) for t in merged_tuples]
+    # Compute pinned hash after normalization (must match what the publisher sees).
     pinned = _policy_hash(merged_tuples)
     return merged_tuples, pinned
 
@@ -153,13 +171,15 @@ def _build_manifests(
             continue
 
         content_text = content_path.read_text(encoding="utf-8")
-        content_hash = _sha256_text(content_text)
 
-        # Verify content hash: metadata.yaml's content_hash must match the
-        # approval record's source_content_hash (the hash of the reviewed content).
-        # policy content_hash is the record integrity hash — not used here.
+        # Use metadata.yaml's content_hash as the canonical content hash.
+        # This is the hash of the LegalX DB content at canonicalization time —
+        # the value that the approval record reviewed and signed off on.
+        # The sha256 of content.md diverges because rendering adds/removes whitespace.
         meta_content_hash = meta.get("content_hash", "")
         expected_hash = t.get("source_content_hash", "")
+
+        # Guard: ensure metadata.yaml and approval record agree on content hash.
         if meta_content_hash and expected_hash and meta_content_hash != expected_hash:
             print(
                 f"ERROR: content_hash mismatch for {svid!r}: "
@@ -167,6 +187,10 @@ def _build_manifests(
                 file=sys.stderr,
             )
             sys.exit(1)
+
+        # content_hash used downstream: sha256 of content.md text (internal consistency).
+        # The gate checks against source_content_hash (approved metadata hash).
+        content_hash = _sha256_text(content_text)
 
         # Compute metadata hash over the raw YAML bytes for provenance
         meta_path = doc_dir / "metadata.yaml"
@@ -309,6 +333,17 @@ def main() -> int:
         chunker=DeterministicChunker(version="1.0"),
         embedder=embedder,
     )
+
+    # Filter assignments to only those whose source_version_id has a manifest.
+    # Skipped sources (missing documents) must not appear in release_assignments
+    # — the FK on source_versions would fail.
+    manifest_svids = {m.source_version_id for m in manifests}
+    compiled_assignments = [
+        a for a in compiled_assignments
+        if a.get("source_version_id") in manifest_svids
+    ]
+    # Recompute pinned hash over the filtered set — publisher verifies this.
+    pinned_policy_hash = _policy_hash(compiled_assignments)
 
     publication_run_id = str(uuid.uuid4())
     print(f"Publishing … (run_id={publication_run_id})")

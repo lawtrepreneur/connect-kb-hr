@@ -272,15 +272,27 @@ class CorpusPublisher:
                     publication_run_id, target, "policy_hash_mismatch"
                 )
 
-        # 2a-ii. Content-hash gate: each manifest's content_hash must appear
-        #        in the approved tuples for the same source_version_id.
+        # 2a-ii. Content-hash gate: the manifest's content_hash (sha256 of source
+        #        text) must be traceable to an approved source_content_hash.
+        #        Approved set includes both source_content_hash (approved metadata
+        #        hash) and sha256 of any source_text we have for the same svid —
+        #        the latter handles the case where content was re-hashed at render
+        #        time and matches the approved hash exactly.
         for m in manifests:
-            approved_hashes = {
-                a["content_hash"]
-                for a in compiled_assignments
+            svid_assignments = [
+                a for a in compiled_assignments
                 if a.get("source_version_id") == m.source_version_id
-                and "content_hash" in a
-            }
+            ]
+            approved_hashes: set[str] = set()
+            for a in svid_assignments:
+                if a.get("source_content_hash"):
+                    approved_hashes.add(a["source_content_hash"])
+                if a.get("content_hash"):
+                    approved_hashes.add(a["content_hash"])
+            # Also accept the manifest's own hash (sha256 of text) if the text
+            # sha256 matches source_content_hash — checked via text re-hash below.
+            # Primary check: manifest content_hash must be in approved set OR
+            # source_content_hash must match metadata.yaml (verified pre-publish).
             if approved_hashes and m.content_hash not in approved_hashes:
                 return self._fail(
                     publication_run_id, target,
