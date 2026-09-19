@@ -16,7 +16,7 @@ import os
 import pathlib
 import sys
 
-MIGRATIONS_DIR = pathlib.Path(__file__).parent.parent.parent.parent.parent / "migrations"
+MIGRATIONS_DIR = pathlib.Path(__file__).parent.parent.parent.parent / "migrations"
 
 
 def _get_dsn(args) -> str:
