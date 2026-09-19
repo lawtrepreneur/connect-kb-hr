@@ -75,7 +75,7 @@ mcp-hr (read-only query layer — separate repo)
 1. **Product-neutral publisher core** — one `CorpusPublisher` class serves all products; product differentiation is via `TargetConfig` (DSN, role, schema name). No product-specific code in the core.
 2. **Audience as assignment predicate, not schema split** — ADR-0005 supersedes the earlier `hr_employer`/`hr_employee` split. One `kb` schema; audience is a row in `kb.release_assignments`.
 3. **Immutable releases** — a Release is built once, validated, and activated atomically. No in-place mutation. Rollback = activate prior release.
-4. **Deterministic chunking** — same source text + source kind + chunker version always produces identical chunk IDs and hashes. Enables byte-identical rebuilds.
+4. **Deterministic chunking** — same source text + source kind + chunker version always produces identical chunk IDs and hashes. Enables byte-identical rebuilds. Chunker v1.1 adds sentence-boundary sub-splitting capped at 500 chars (empirically measured llama-swap endpoint limit).
 5. **Content-free manifests** — manifests carry hashes and metadata, never source body text. The publisher verifies source body matches manifest content hash before building.
 6. **Protocol-based store abstraction** — `CorpusStore` protocol decouples the publisher from PostgreSQL; tests use `MemoryStore`, production uses `PostgresStore`.
 7. **Environment-only credentials** — `TargetConfig.from_env()` reads `CORPUS_<PRODUCT>_DSN` and `CORPUS_<PRODUCT>_PUBLISHER_ROLE`. No config files, no logged DSNs.
