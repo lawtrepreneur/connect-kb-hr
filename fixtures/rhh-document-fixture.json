@@ -1,0 +1,28 @@
+{
+  "manifest_schema_version": "1.0",
+  "source_id": "rhh-esah-employer-hiring-001",
+  "source_version_id": "rhh-esah-employer-hiring-001-v1",
+  "source_kind": "rhh_document",
+  "canonical_origin": "https://github.com/lawtrepreneur/kb-hr",
+  "content_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+  "metadata_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "jurisdiction": "ON",
+  "effective_interval": {
+    "start": "2026-01-01",
+    "end": null
+  },
+  "provenance": {
+    "origin_commit": "placeholder-git-sha",
+    "reviewed_by": "reviewer-001",
+    "reviewed_at": "2026-09-13T00:00:00Z"
+  },
+  "canonical_locator": "collections/employer/hiring/esah-v1.md",
+  "rights_basis": "RHH_proprietary",
+  "rights_holder": "RHH",
+  "permitted_use": "subscriber_retrieval",
+  "attribution_required": false,
+  "global_state": "valid",
+  "chunker_version": "1.0",
+  "embedding_model_id": "nomic-embed-text",
+  "embedding_model_digest": "sha256:placeholder"
+}

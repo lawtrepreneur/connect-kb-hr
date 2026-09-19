@@ -1,0 +1,28 @@
+{
+  "manifest_schema_version": "1.0",
+  "source_id": "legalx-clause-employment-noncompete-001",
+  "source_version_id": "legalx-clause-employment-noncompete-001-v1",
+  "source_kind": "clause",
+  "canonical_origin": "https://github.com/lawtrepreneur/km-legalx-ontario",
+  "content_hash": "0000000000000000000000000000000000000000000000000000000000000003",
+  "metadata_hash": "0000000000000000000000000000000000000000000000000000000000000004",
+  "jurisdiction": "ON",
+  "effective_interval": {
+    "start": "2025-01-01",
+    "end": null
+  },
+  "provenance": {
+    "origin_commit": "placeholder-git-sha",
+    "reviewed_by": null,
+    "reviewed_at": null
+  },
+  "canonical_locator": "clauses/employment/noncompete-on-v1.md",
+  "rights_basis": "RHH_proprietary",
+  "rights_holder": "RHH",
+  "permitted_use": "subscriber_retrieval",
+  "attribution_required": false,
+  "global_state": "valid",
+  "chunker_version": "1.0",
+  "embedding_model_id": "nomic-embed-text",
+  "embedding_model_digest": "sha256:placeholder"
+}

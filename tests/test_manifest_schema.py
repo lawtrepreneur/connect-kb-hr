@@ -16,9 +16,21 @@ import pathlib
 
 import pytest
 
-KB_HR_ROOT = pathlib.Path(__file__).parent.parent.parent / "kb-hr"
-SCHEMA_PATH = KB_HR_ROOT / "schema" / "corpus-manifest-v1.0.json"
-FIXTURES_DIR = KB_HR_ROOT / "fixtures"
+_REPO_ROOT = pathlib.Path(__file__).parent.parent
+_KB_HR_SIBLING = _REPO_ROOT.parent / "kb-hr"
+
+# Fixtures and schema are bundled in this repo under fixtures/ and schemas/;
+# fall back to the kb-hr sibling checkout for local dev convenience.
+FIXTURES_DIR = (
+    _REPO_ROOT / "fixtures"
+    if (_REPO_ROOT / "fixtures").exists()
+    else _KB_HR_SIBLING / "fixtures"
+)
+SCHEMA_PATH = (
+    _REPO_ROOT / "schemas" / "corpus-manifest-v1.0.json"
+    if (_REPO_ROOT / "schemas" / "corpus-manifest-v1.0.json").exists()
+    else _KB_HR_SIBLING / "schema" / "corpus-manifest-v1.0.json"
+)
 
 try:
     import jsonschema

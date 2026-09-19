@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lawtrepreneur.github.io/kb-hr/schema/corpus-manifest/v1.0.json",
+  "title": "CorpusManifest",
+  "description": "Versioned publication manifest for one immutable source version. Content-free: records hashes of substantive content and metadata, never the content itself.",
+  "type": "object",
+  "required": [
+    "manifest_schema_version",
+    "source_id",
+    "source_version_id",
+    "source_kind",
+    "canonical_origin",
+    "content_hash",
+    "metadata_hash",
+    "jurisdiction",
+    "effective_interval",
+    "provenance",
+    "canonical_locator",
+    "rights_basis",
+    "rights_holder",
+    "permitted_use",
+    "attribution_required",
+    "global_state",
+    "chunker_version",
+    "embedding_model_id",
+    "embedding_model_digest"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "manifest_schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version. Publishers must reject manifests with unsupported versions before any DB mutation."
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable, immutable identifier for the logical source (survives version changes)."
+    },
+    "source_version_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Immutable identifier for this exact source version. Content changes require a new source_version_id."
+    },
+    "source_kind": {
+      "type": "string",
+      "enum": ["clause", "casebrief", "rhh_document", "legislation"],
+      "description": "Determines chunking strategy."
+    },
+    "canonical_origin": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Git repository URL or other explicitly governed immutable origin. DB serving tables are not a valid canonical origin."
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hex digest of the normalized source body text. Changes when content changes."
+    },
+    "metadata_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hex digest of the canonical metadata fields (jurisdiction, effective_interval, rights_basis, rights_holder, permitted_use, attribution_required). Changes when metadata changes; distinct from content_hash."
+    },
+    "jurisdiction": {
+      "type": "string",
+      "minLength": 1,
+      "examples": ["ON", "CA"],
+      "description": "ISO 3166-2 or ISO 3166-1 jurisdiction code."
+    },
+    "effective_interval": {
+      "type": "object",
+      "required": ["start"],
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date",
+          "description": "ISO-8601 date the source version became effective."
+        },
+        "end": {
+          "type": ["string", "null"],
+          "format": "date",
+          "description": "ISO-8601 date the source version expires. null means currently effective with no scheduled expiry."
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["origin_commit"],
+      "additionalProperties": false,
+      "properties": {
+        "origin_commit": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Git SHA or equivalent canonical revision the source was compiled from."
+        },
+        "reviewed_by": {
+          "type": ["string", "null"],
+          "description": "Identifier of the reviewer who admitted this version. Never a full name or email — use a role or reviewer ID."
+        },
+        "reviewed_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO-8601 datetime of review."
+        }
+      }
+    },
+    "canonical_locator": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable path within the canonical origin (e.g. collections/employer/hiring/esah-v1.md). Used as locator_prefix in chunker."
+    },
+    "rights_basis": {
+      "type": "string",
+      "minLength": 1,
+      "examples": ["RHH_proprietary", "Crown_copyright_Ontario", "CC-BY-4.0"],
+      "description": "Rights basis under which this source is published."
+    },
+    "rights_holder": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Entity holding the rights."
+    },
+    "permitted_use": {
+      "type": "string",
+      "minLength": 1,
+      "examples": ["internal_retrieval_only", "subscriber_retrieval"],
+      "description": "Controlled permitted-use tag."
+    },
+    "attribution_required": {
+      "type": "boolean",
+      "description": "Whether attribution to the rights_holder is required on use."
+    },
+    "global_state": {
+      "type": "string",
+      "enum": ["valid", "suspended", "withdrawn", "superseded"],
+      "description": "Only 'valid' sources may enter a new active release. Withdrawal is represented here without deleting historical versions."
+    },
+    "chunker_version": {
+      "type": "string",
+      "minLength": 1,
+      "examples": ["1.0"],
+      "description": "Version of the DeterministicChunker used to produce chunks from this source."
+    },
+    "embedding_model_id": {
+      "type": "string",
+      "minLength": 1,
+      "examples": ["nomic-embed-text"],
+      "description": "Embedding model name/ID. All manifests in a batch must agree."
+    },
+    "embedding_model_digest": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Digest pinning the exact embedding model version (e.g. SHA-256 of model weights or registry digest). All manifests in a batch must agree."
+    }
+  }
+}
