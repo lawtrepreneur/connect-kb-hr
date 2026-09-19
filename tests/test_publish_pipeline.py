@@ -112,6 +112,7 @@ def _assignment(
     process: str = "hiring",
     content_type: str = "question",
     source_role: str = "substantive_guidance",
+    content_hash: str = CONTENT_HASH,
 ) -> dict:
     return {
         "source_version_id": source_version_id,
@@ -119,6 +120,7 @@ def _assignment(
         "process_code": process,
         "content_type_code": content_type,
         "source_role_code": source_role,
+        "content_hash": content_hash,
         "approval_record": "rhh-esah-employer-hiring-001-v1.yaml",
         "reviewer_id": "reviewer-001",
         "reviewed_at": "2026-09-01T00:00:00Z",
@@ -130,6 +132,7 @@ def _publish(
     manifest=None,
     publication_run_id: str = "run-001",
     assignments: list[dict] | None = None,
+    pinned_policy_hash: str | None = None,
 ):
     m = manifest or _manifest()
     asgn = assignments if assignments is not None else [_assignment()]
@@ -143,6 +146,7 @@ def _publish(
         source_texts={m.source_version_id: SOURCE_TEXT},
         source_commit="abc123",
         compiled_assignments=asgn,
+        pinned_policy_hash=pinned_policy_hash,
     )
     return result
 
@@ -326,6 +330,50 @@ def test_emergency_suspend_excludes_source_from_search():
         audience="employer", limit=5,
     )
     assert chunks == []
+
+
+def test_policy_hash_mismatch_rejected():
+    """Supplying a wrong pinned_policy_hash fires policy_hash_mismatch."""
+    from connect_kb_hr.corpus.publisher import _policy_hash
+
+    store = InMemoryCorpusStore()
+    asgn = [_assignment()]
+    wrong_hash = _policy_hash([_assignment(audience="employee")])  # different list
+    result = _publish(store, assignments=asgn, pinned_policy_hash=wrong_hash)
+    assert not result.ok
+    assert result.detail == "policy_hash_mismatch"
+    assert store.active_release() is None
+
+
+def test_policy_hash_correct_passes():
+    """Correct pinned_policy_hash allows publication."""
+    from connect_kb_hr.corpus.publisher import _policy_hash
+
+    store = InMemoryCorpusStore()
+    asgn = [_assignment()]
+    correct_hash = _policy_hash(asgn)
+    result = _publish(store, assignments=asgn, pinned_policy_hash=correct_hash)
+    assert result.ok
+    assert store.active_release() is not None
+
+
+def test_content_hash_mismatch_rejected():
+    """Assignment content_hash that differs from manifest content_hash fires content_hash_not_approved."""
+    store = InMemoryCorpusStore()
+    bad_hash = "a" * 64  # wrong SHA-256
+    asgn = [_assignment(content_hash=bad_hash)]
+    result = _publish(store, assignments=asgn)
+    assert not result.ok
+    assert "content_hash_not_approved" in (result.detail or "")
+    assert store.active_release() is None
+
+
+def test_content_hash_correct_passes():
+    """Assignment content_hash matching manifest allows publication."""
+    store = InMemoryCorpusStore()
+    asgn = [_assignment(content_hash=CONTENT_HASH)]
+    result = _publish(store, assignments=asgn)
+    assert result.ok
 
 
 # ---------------------------------------------------------------------------

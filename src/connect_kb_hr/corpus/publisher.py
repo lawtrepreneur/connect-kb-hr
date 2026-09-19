@@ -204,6 +204,7 @@ class CorpusPublisher:
         source_texts: Mapping[str, str],
         source_commit: str,
         compiled_assignments: list[dict],
+        pinned_policy_hash: str | None = None,
     ) -> PublicationResult:
         """Publish a manifest batch to one target.
 
@@ -261,6 +262,29 @@ class CorpusPublisher:
                 return self._fail(
                     publication_run_id, target,
                     f"compiled_assignments:missing_for:{m.source_version_id}"
+                )
+
+        # 2a-i. Policy-hash gate: supplied hash must match the compiled list.
+        if pinned_policy_hash is not None:
+            actual_policy_hash = _policy_hash(compiled_assignments)
+            if actual_policy_hash != pinned_policy_hash:
+                return self._fail(
+                    publication_run_id, target, "policy_hash_mismatch"
+                )
+
+        # 2a-ii. Content-hash gate: each manifest's content_hash must appear
+        #        in the approved tuples for the same source_version_id.
+        for m in manifests:
+            approved_hashes = {
+                a["content_hash"]
+                for a in compiled_assignments
+                if a.get("source_version_id") == m.source_version_id
+                and "content_hash" in a
+            }
+            if approved_hashes and m.content_hash not in approved_hashes:
+                return self._fail(
+                    publication_run_id, target,
+                    f"content_hash_not_approved:{m.source_version_id}"
                 )
 
         # 2b. Require a pinned embedder whose identity matches the batch.

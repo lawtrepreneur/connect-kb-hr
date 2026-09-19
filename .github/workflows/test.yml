@@ -1,0 +1,52 @@
+name: test
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: hrmcp
+          POSTGRES_PASSWORD: hrmcp_test
+          POSTGRES_DB: hrmcp
+        ports:
+          - 5436:5432
+        options: >-
+          --health-cmd "pg_isready -U hrmcp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CORPUS_HR_TEST_DSN: "postgresql://hrmcp:hrmcp_test@localhost:5436/hrmcp"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Apply migrations
+        run: |
+          python -m connect_kb_hr.db.migrate --dsn "$CORPUS_HR_TEST_DSN" up
+
+      - name: Run tests (zero skips expected)
+        run: |
+          pytest -v --tb=short -p no:warnings \
+            --override-ini="addopts=" \
+            tests/
