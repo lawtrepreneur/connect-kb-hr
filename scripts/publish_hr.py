@@ -155,12 +155,15 @@ def _build_manifests(
         content_text = content_path.read_text(encoding="utf-8")
         content_hash = _sha256_text(content_text)
 
-        # Verify content hash matches the compiled assignment's content_hash
-        expected_hash = t.get("content_hash", "")
-        if expected_hash and content_hash != expected_hash:
+        # Verify content hash: metadata.yaml's content_hash must match the
+        # approval record's source_content_hash (the hash of the reviewed content).
+        # policy content_hash is the record integrity hash — not used here.
+        meta_content_hash = meta.get("content_hash", "")
+        expected_hash = t.get("source_content_hash", "")
+        if meta_content_hash and expected_hash and meta_content_hash != expected_hash:
             print(
                 f"ERROR: content_hash mismatch for {svid!r}: "
-                f"file={content_hash[:12]}… policy={expected_hash[:12]}…",
+                f"metadata.yaml={meta_content_hash[:12]}… approval_record={expected_hash[:12]}…",
                 file=sys.stderr,
             )
             sys.exit(1)
